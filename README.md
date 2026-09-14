@@ -1,5 +1,7 @@
 # Tigo Optimizer Local Monitoring with ESP32, TapTap & Home Assistant
 
+Welcome to my first published Github page. This will hopefully help others navigate their way through add Tigo optimizer entities to their home assistant for monitoring purpose. I am not a coder or programmer so have had quite a lot of help from AI on this with a lot of failures and frustrations, mostly from my misunderstandings, so if this can help someone navigate the complexities of it, then its of value being on here.
+
 This project documents an end-to-end setup for **fully local, offline monitoring** of Tigo TS4 optimizers using:
 
 - A **MAX485 + ESP32** RS-485 bridge tapping the Tigo CCA GATEWAY bus.
