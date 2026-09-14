@@ -1,258 +1,251 @@
-# Tigo Optimizer Local Monitoring with ESP32, TapTap & Home Assistant
+# Tigo TapTap Unraid Home Assistant Bridge
 
-Welcome to my first published Github page. This will hopefully help others navigate their way through add Tigo optimizer entities to their home assistant for monitoring purpose. I am not a coder or programmer so have had quite a lot of help from AI on this with a lot of failures and frustrations, mostly from my misunderstandings, so if this can help someone navigate the complexities of it, then its of value being on here.
+A practical guide for monitoring Tigo TS4 optimizer data locally in Home Assistant using an ESP32, an RS-485 transceiver, Unraid, MQTT, and the TapTap software stack.
 
-This project documents an end-to-end setup for **fully local, offline monitoring** of Tigo TS4 optimizers using:
+This project was built to provide a local path from the Tigo CCA/GATEWAY bus to Home Assistant. It is intended for people who want useful optimizer data without making their Home Assistant installation depend on the Tigo cloud.
 
-- A **MAX485 + ESP32** RS-485 bridge tapping the Tigo CCA GATEWAY bus.
-- The **litinoveweedle fork** of [`taptap`](https://github.com/litinoveweedle/taptap) to create a docker on Unraid.
-- The [`taptap-mqtt`](https://github.com/litinoveweedle/taptap-mqtt) bridge to Home Assistant MQTT.
-- An **Unraid** host running the `taptap-mqtt` container.
-- **Home Assistant** with the MQTT integration and auto-discovery.
+> This is a community project and is not affiliated with or endorsed by Tigo. It is provided as-is. Read the safety notes before connecting anything to a PV system.
 
-The goal is to get per-module power/voltage/temperature data into Home Assistant with a 100% local path (Tigo cloud optional), and to provide a practical, step-by-step guide for others.
+## What you will build
 
-> This is a personal project, not affiliated with Tigo or the upstream authors. Use at your own risk and respect electrical safety.
+The completed setup looks like this:
 
-## 1. Hardware overview
+```text
+Tigo CCA/GATEWAY RS-485 bus
+          |
+          v
+MAX485 transceiver (receive-only tap)
+          |
+          v
+ESP32 Wi-Fi bridge
+          |
+          v
+TCP on port 7160
+          |
+          v
+Unraid: taptap + taptap-mqtt
+          |
+          v
+MQTT broker
+          |
+          v
+Home Assistant MQTT auto-discovery
+```
 
-- Tigo CCA (or compatible controller) with GATEWAY RS-485 port.
-- One or more Tigo TS4 optimizers (I am currently using TS4-O-A but should work for the others).
-- MAX485 (or 3.3 V RS-485 transceiver like MAX3485/SP3485) module.
-- ESP32 dev board (e.g. devkit-style) with WiFi.
-- Unraid server on the same LAN as the ESP32 and Home Assistant.
+The ESP32 does not decode the Tigo protocol. It forwards the RS-485 traffic over TCP. TapTap performs the protocol work, and taptap-mqtt publishes the results to MQTT for Home Assistant.
 
-Basic signal path:
+## Before you start
 
-- Tigo CCA GATEWAY RS-485 A/B → MAX485 → ESP32 UART2 → WiFi → Unraid → `taptap` → `taptap-mqtt` → MQTT → Home Assistant.
+You will need:
 
-> The ESP32 acts purely as a **transparent RS-485 to TCP bridge**. It does not interpret or inject protocol frames; all decoding happens in `taptap`.
+- A Tigo CCA or compatible controller with access to the GATEWAY RS-485 A/B connection.
+- Tigo TS4 optimizers already installed and operating.
+- An ESP32 development board with a USB data cable.
+- A 3.3 V-compatible RS-485 transceiver. A MAX485-style board can work, but check the voltage requirements of the exact board you own.
+- An Unraid server or another Docker host on the same LAN.
+- An MQTT broker reachable by Home Assistant and the Unraid host.
+- A computer with Arduino IDE for uploading the firmware.
 
-## 2. RS-485 tap wiring (receive-only)
+### Safety first
 
-This setup follows the recommendations in the upstream `taptap` docs: tap the existing RS-485 bus in parallel and avoid adding a third termination.[cite:1]
+PV equipment can contain dangerous voltages, even when the system appears to be switched off. Do not alter PV string wiring or work inside equipment that you are not qualified to service. This project only describes a parallel tap of the low-voltage communications connection; follow the equipment manufacturer's instructions and local electrical rules.
 
-**MAX485 → ESP32 (receive-only):**
+Keep the MAX485 receiver electrically isolated from any signal you do not understand. Do not add a termination resistor to the bus unless the bus design specifically requires it. The tap should not replace, disconnect, or re-terminate the existing Tigo wiring.
 
-- RO → ESP32 RX (UART2, e.g. GPIO16).
-- DI → ESP32 TX (UART2, e.g. GPIO17) — not used for transmit, but wired.
-- RE → GND (active-low receive enable).
-- DE → GND (driver disabled).
-- VCC → 3.3 V (or 5 V if using a genuine 5 V MAX485 and level-tolerant board).
-- GND → ESP32 GND.
+## Hardware wiring
 
-**MAX485 A/B:**
+The ESP32 firmware uses UART2 at 38400 baud, 8N1, with GPIO16 as RX and GPIO17 as TX. The MAX485 driver is disabled so the bridge listens without transmitting onto the Tigo bus.
 
-- Connect A/B **in parallel** to the Tigo CCA GATEWAY A/B terminals. e.g A to A and B to B.
-- This can be added at either the TAP end or CCA end. I have opted to keep mine beside the CCA for better Wifi signal.
-- Do not add another termination resistor; keep the CCA and last TAP as the only terminations.[cite:1]
+### MAX485 wiring table
 
-## 3. ESP32 firmware – RS-485 to TCP bridge
+| MAX485 pin | Connects to | Notes |
+|---|---|---|
+| VCC | ESP32 3.3 V, or 5 V only when appropriate for the exact transceiver board | Check the board's datasheet and logic-level compatibility. |
+| GND | ESP32 GND | A common ground is required. |
+| DI | ESP32 GPIO17 / TX2 | Not used during receive-only monitoring, but wire it for completeness. |
+| RO | ESP32 GPIO16 / RX2 | Carries RS-485 data into the ESP32. |
+| DE | GND | Keeps the RS-485 driver permanently disabled. |
+| RE | GND | Keeps the receiver enabled; RE is active-low. |
+| A | Tigo CCA/GATEWAY A | Connect in parallel without disturbing existing wiring. |
+| B | Tigo CCA/GATEWAY B | Connect in parallel without disturbing existing wiring. |
 
-The ESP32 firmware should:
+If no data appears, check A/B polarity first. Some transceiver boards label the differential pair differently, so compare the board markings with its documentation rather than assuming every board uses identical labels.
 
-- Configure UART2 at 38400 baud, 8N1 (matching Tigo GATEWAY bus).
-- Continuously forward bytes between UART2 and a TCP socket:
-  - TCP server listening on e.g. `192.168.1.190:7160`.
-- Handle one client at a time (the Unraid host running `taptap`/`taptap-mqtt`).
+## Firmware upload with Arduino IDE
 
-There are many examples of "ESP32 UART to TCP bridge" sketches; this project assumes you already have one running and verified by:
+The firmware is already included in this repository at `firmware/taptap_esp32_bridge.ino`. You do not need to write the sketch yourself.
+
+### 1. Install Arduino IDE
+
+Install the current Arduino IDE from the official Arduino website and connect the ESP32 with a USB **data** cable. Charge-only cables will power the board but will not provide a serial port.
+
+### 2. Add ESP32 board support
+
+In Arduino IDE:
+
+1. Open **File → Preferences**.
+2. Find **Additional Boards Manager URLs**.
+3. Add Espressif's ESP32 package URL:
+
+   `https://espressif.github.io/arduino-esp32/package_esp32_index.json`
+
+4. Open **Tools → Board → Boards Manager**.
+5. Search for **esp32**.
+6. Install **esp32 by Espressif Systems**.
+
+### 3. Open the firmware
+
+Download or clone this repository, then open:
+
+```text
+firmware/taptap_esp32_bridge.ino
+```
+
+If Arduino asks to create a sketch folder or rename the file, allow it to do so. The sketch uses the ESP32's built-in `WiFi`, `WebServer`, and `Preferences` libraries; no separate library installation should be necessary.
+
+### 4. Select board and port
+
+Connect the ESP32 and choose:
+
+- **Tools → Board**: select the model that matches your board. If unsure, start with **ESP32 Dev Module**.
+- **Tools → Port**: select the new serial port that appears when the board is connected.
+- Leave the other settings at their defaults unless your particular board requires a different flash or upload setting.
+
+### 5. Compile and upload
+
+1. Click **Verify** to compile the sketch.
+2. Correct any board or port selection issue reported by Arduino IDE.
+3. Click **Upload**.
+4. If the upload pauses at `Connecting...`, hold the board's **BOOT** button while the upload begins, then release it when writing starts.
+5. Wait for the upload to complete.
+
+Open **Tools → Serial Monitor**, set the speed to **115200 baud**, and press the ESP32 reset button. You should see the public-release build name and the setup access point details.
+
+## Configure the ESP32
+
+On first boot, the firmware starts a temporary Wi-Fi access point:
+
+- SSID: `TapTap-Setup`
+- Password: `taptap123`
+- Setup address: `http://192.168.4.1/wifi`
+
+Connect your phone or computer to that network, open the setup address, enter the normal home Wi-Fi SSID and password, and choose **Save & Reboot**.
+
+After reboot, the ESP32 tries to join the saved Wi-Fi. When connected, the setup AP turns off and the status page reports **Wi-Fi Connected**. If the saved network is unavailable for long enough, the setup AP is enabled again so the settings can be corrected.
+
+> The default setup password is published because it is part of the example firmware. For a real installation, change it before distributing or deploying the firmware, and do not expose the ESP32's HTTP pages to the internet.
+
+Open the ESP32's normal LAN IP in a browser. The status page shows the Wi-Fi state, IP address, TCP port, serial settings, readable byte count, last byte time, and uptime in `hours:minutes:seconds` format.
+
+## Test the bridge
+
+The firmware listens for TapTap on TCP port `7160`, which is the port expected by the TapTap TCP command in this setup.
+
+From the Unraid host, or another computer with TapTap installed, run:
 
 ```bash
-taptap observe --tcp 192.168.1.190 --port 7160
+taptap observe --tcp <ESP32_IP_ADDRESS>
 ```
 
-from a machine on the same LAN as the ESP32.
+Replace `<ESP32_IP_ADDRESS>` with the address assigned by your router. Keep the command running for a while. On the ESP32 status page:
 
-## 4. Building the taptap-mqtt Docker image
+- **Bytes relayed** should increase when traffic is received.
+- **Last byte seen** should update when the bus is active.
+- **taptap client** should show connected while TapTap is running.
 
-This project uses the **litinoveweedle fork** of `taptap` because `taptap-mqtt` depends on its extended features (module serial discovery, etc.).[cite:2][cite:24]
+Solar and optimizer traffic can vary with system state and daylight. No immediate output does not always mean the wiring is wrong.
 
-Example multi-stage Dockerfile:
+## Unraid and MQTT setup
 
-```Dockerfile
-FROM rust:1-bookworm AS builder
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    pkg-config libudev-dev \
- && rm -rf /var/lib/apt/lists/*
-WORKDIR /build
-RUN git clone [https://github.com/litinoveweedle/taptap.git](https://github.com/litinoveweedle/taptap.git) .
-RUN cargo build --release
+The remaining software path is:
 
-FROM python:3.11-slim-bookworm
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    git ca-certificates \
- && rm -rf /var/lib/apt/lists/*
-WORKDIR /app
-RUN git clone [https://github.com/litinoveweedle/taptap-mqtt.git](https://github.com/litinoveweedle/taptap-mqtt.git) .
-RUN pip install --no-cache-dir -r requirements.txt
-COPY --from=builder /build/target/release/taptap /usr/local/bin/taptap
-CMD ["python3", "/app/taptap-mqtt.py"]
+```text
+ESP32 TCP bridge → taptap → taptap-mqtt → MQTT broker → Home Assistant
 ```
 
-Build on Unraid (or any build host):
+Use the public `config-example.ini` as your starting point. Copy it to a private `config.ini` and change the placeholders for your own installation:
 
-```bash
-docker build -t taptap-mqtt:latest .
-```
+- MQTT broker hostname or IP address.
+- MQTT username and password.
+- ESP32 IP address or hostname.
+- Module names and serial numbers.
+- Site/topic name.
 
-## 5. Unraid container configuration
+Do not commit the real `config.ini`. It can contain private network addresses, MQTT credentials, and hardware identifiers. Keep it in Unraid appdata or another private location and add `config.ini` to `.gitignore`.
 
-On Unraid:
-
-1. Add a folder for config:
-
-   ```bash
-   mkdir -p /mnt/user/appdata/taptap-mqtt
-   ```
-
-2. In the Docker tab → **Add Container**:
-   - Name: `TapTap-Mqtt`
-   - Repository: `taptap-mqtt:latest`
-   - Network: `Host`
-   - Restart policy: `unless-stopped`
-   - Command:
-     - Command: `python3`
-     - Post Arguments: `/app/taptap-mqtt.py`
-
-3. Paths:
-   - Bind only `config.ini` from appdata:
-
-     - Host path: `/mnt/user/appdata/taptap-mqtt/config.ini`
-     - Container path: `/app/config.ini`
-     - Access: `Read/Write`
-
-> Note: Binding the whole `/app` directory will hide the `taptap-mqtt.py` script; bind just `config.ini` instead.
-
-## 6. config.ini example
-
-Copy `config.ini.example` from the repo, rename to `config.ini`, and adjust:
+The important TapTap settings are:
 
 ```ini
-[MQTT]
-SERVER = 192.168.1.14
-PORT = 1883
-QOS = 1
-TIMEOUT = 5
-USER = taptapmqtt
-PASS = taptapmqtt
-
 [TAPTAP]
-LOG_LEVEL = warning
 BINARY = /usr/local/bin/taptap
-SERIAL =
-ADDRESS = 192.168.1.190
+ADDRESS = CHANGE_ME_BRIDGE_HOST
 PORT = 7160
-MODULES = B:Roof_SW_1:4-E51A7FL, B:Roof_SW_2:4-E24114Z, B:Roof_SW_3:4-E51A85Z,
-          B:Roof_SW_4:4-E513FEP, B:Roof_SW_5:4-E246C2J, B:Roof_SW_6:4-E23F5AJ,
-          B:Roof_SW_7:4-996FD3J, B:Roof_SW_8:4-996F8AR, B:Roof_SW_9:4-8E2929Y
-TOPIC_PREFIX = taptap
-TOPIC_NAME = tigo1
-TIMEOUT = 180
 UPDATE = 15
-STATE_FILE = ./taptap.json
-
-[HA]
-DISCOVERY_PREFIX = homeassistant
-DISCOVERY_LEGACY = false
-BIRTH_TOPIC = homeassistant/status
-NODES_AVAILABILITY_ONLINE = false
-NODES_AVAILABILITY_IDENTIFIED = false
-STRINGS_AVAILABILITY_ONLINE = false
-STRINGS_AVAILABILITY_IDENTIFIED = false
-STATS_AVAILABILITY_ONLINE = false
-STATS_AVAILABILITY_IDENTIFIED = false
-NODES_SENSORS_RECORDER = energy
-STRINGS_SENSORS_RECORDER = energy
-STATS_SENSORS_RECORDER = energy
-
-[RUNTIME]
-MAX_ERROR = 15
-RUN_FILE = /run/taptap/taptap.run
 ```
 
-Key points:
+The `MODULES` value maps the string, friendly name, and module serial number. Use the format shown in the example file:
 
-- `[MQTT]`: points to Home Assistant’s MQTT broker and uses a dedicated HA user `taptapmqtt`.[cite:43][cite:48]
-- `[TAPTAP]`:
-  - `ADDRESS`/`PORT`: ESP32 RS-485 bridge (TCP).
-  - `BINARY`: path to the `taptap` binary from the builder image.
-  - `MODULES`: `STRING:NAME:SERIAL` per optimizer; used for naming and mapping.[cite:24]
-- `[HA]`: controls HA auto-discovery topics and availability behavior.
-
-Restart the container after changes:
-
-```bash
-docker restart TapTap-Mqtt
+```ini
+MODULES = B:Module_01:REPLACE_WITH_SERIAL_01, B:Module_02:REPLACE_WITH_SERIAL_02
 ```
 
-## 7. Home Assistant integration
+Configure the container so the `taptap` executable is available at the path in `BINARY`, the config file is mounted read/write where required, and the container can reach both the ESP32 and MQTT broker. Restart the container after changing its configuration.
 
-Requirements:
+## Home Assistant
 
-- MQTT integration in HA pointing at the same broker (`SERVER`, `PORT`, `USER`, `PASS`).
-- HA user `taptapmqtt` (Settings → People → Users) with MQTT access.[cite:43][cite:48]
+Home Assistant needs an MQTT integration connected to the same broker configured in `config.ini`. Give the bridge a dedicated MQTT account rather than using an administrator account.
 
-Once the container is running:
+When taptap-mqtt is running successfully, it publishes MQTT discovery information. The discovered Tigo devices and sensors should then appear under **Settings → Devices & services → MQTT**. The exact entities depend on the data available from the Tigo system and the module mapping in your configuration.
 
-- Check MQTT topics from a terminal:
+## Troubleshooting
 
-  ```bash
-  mosquitto_sub -h 192.168.1.14 -p 1883 \
-    -u taptapmqtt -P taptapmqtt \
-    -t 'taptap/#' -v
-  ```
+### The ESP32 does not appear as a USB port
 
-- In HA:
-  - Go to **Settings → Devices & Services → MQTT**.
-  - A device like `taptap tigo1` should appear with per-module nodes and overall stats.[cite:24][cite:87]
+Try another USB cable, install the USB-to-serial driver required by your board, and check Windows Device Manager, macOS System Information, or the Linux serial devices list.
 
-You can then:
+### Arduino gets stuck at Connecting
 
-- Rename devices (e.g. `PV Roof – B1`, `PV Roof – B2`) and key entities (power, voltage, temperature).
-- Build Lovelace dashboards for single module and string/overall views.
+Confirm the board and port, close any program using the serial port, press reset, and hold BOOT briefly while uploading.
 
-## 8. Troubleshooting
+### The setup Wi-Fi network is not visible
 
-- `ConnectionRefusedError`:
-  - Check MQTT `SERVER`, `PORT`, `USER`, `PASS`.
-  - Verify with `mosquitto_sub` from the Unraid host.[cite:49][cite:51]
+Press reset and wait for the startup messages. If saved Wi-Fi credentials are present, the ESP32 may connect to the normal network and turn the setup AP off. If necessary, clear saved credentials from the Wi-Fi settings page or erase the board's flash.
 
-- `taptap observe --tcp ...` errors:
-  - Confirm ESP32 IP and port.
-  - Check RS-485 wiring (A/B not swapped, RE/DE tied low, no extra termination).[cite:28][cite:30]
+### The dashboard works but Bytes relayed stays at zero
 
-- No `observe` output but `peek-bytes` works:
-  - Some frames (especially power reports) are sparse; leave `observe` running for several minutes or test under daylight conditions.[cite:24][cite:29]
+Check MAX485 power and common ground, confirm GPIO16 is connected to RO, verify A/B polarity, and check that DE is grounded and RE is grounded. Also confirm that you are tapping the intended Tigo GATEWAY RS-485 connection and not changing the existing bus termination.
 
-- Old HA entities hanging around:
-  - Delete/disable old devices in **Settings → Devices & Services → MQTT**.
-  - Optionally clear retained MQTT discovery topics using MQTT Explorer or `mosquitto_pub` to remove obsolete `homeassistant/.../config` topics.[cite:75][cite:87]
+### TapTap cannot connect
 
-## 9. Unraid polish (icon & WebUI)
+Confirm the ESP32 LAN IP, port `7160`, and that the Unraid host can reach it. Check that another client is not already using the single TCP bridge connection.
 
-- Icon:
-  - Copy a PNG into:
+### No data appears immediately
 
-    ```bash
-    cp /mnt/user/appdata/taptap-mqtt/tigo.png \
-       /boot/config/plugins/dockerMan/images/taptap-mqtt.png
-    ```
+Allow time for traffic and test when the PV system is active. Check the ESP32 dashboard's last-byte field and test the TCP connection before troubleshooting MQTT.
 
-  - In Unraid Docker Edit (Advanced):
-    - Icon URL:
+### MQTT connects but Home Assistant shows no devices
 
-      ```text
-      /plugins/dynamix.docker.manager/images/taptap-mqtt.png
-      ```
+Check the broker address, port, MQTT credentials, discovery prefix, and container logs. Confirm that discovery messages are being published and that retained discovery topics from an older configuration are not causing confusion.
 
-- WebUI:
-  - Set WebUI URL to your HA dashboard, e.g.:
+## Privacy and maintenance
 
-    ```text
-    http://192.168.1.14:8123/dashboard/solar
-    ```
+Keep private installation details out of public commits:
 
----
+- Wi-Fi passwords.
+- MQTT passwords or tokens.
+- Private IP addresses if you do not want to publish your network layout.
+- Tigo module serial numbers if you consider them sensitive.
+- Logs containing credentials or identifiable network details.
 
-This README reflects a working setup based on an ESP32 RS-485 bridge, the litinoveweedle taptap fork and taptap-mqtt, Unraid, and Home Assistant, with all configuration kept in `/mnt/user/appdata/taptap-mqtt/config.ini` on the Unraid host.
+The ESP32 firmware is deliberately simple: it forwards bytes and provides a small local status/configuration page. It does not provide internet security or user authentication. Keep it on a trusted LAN and do not forward its HTTP or TCP ports to the public internet.
+
+## Credits
+
+This project builds on the TapTap protocol work and the `taptap-mqtt` bridge. Please consult their upstream repositories for protocol details, software updates, and issue reporting:
+
+- [willglynn/taptap](https://github.com/willglynn/taptap)
+- [litinoveweedle/taptap-mqtt](https://github.com/litinoveweedle/taptap-mqtt)
+
+## License
+
+Add the license that applies to your firmware, documentation, and original configuration examples. Also respect the licenses of the upstream projects linked above.
