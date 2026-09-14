@@ -41,7 +41,7 @@ You will need:
 - A Tigo CCA or compatible controller with access to the GATEWAY RS-485 A/B connection.
 - Tigo TS4 optimizers already installed and operating.
 - An ESP32 development board with a USB data cable.
-- A 3.3 V-compatible RS-485 transceiver. A MAX485-style board can work, but check the voltage requirements of the exact board you own.
+- A 3.3v or 5v compatible RS-485 transceiver. A MAX485-style board can work, but check the voltage requirements of the exact board you own.
 - An Unraid server or another Docker host on the same LAN.
 - An MQTT broker reachable by Home Assistant and the Unraid host.
 - A computer with Arduino IDE for uploading the firmware.
