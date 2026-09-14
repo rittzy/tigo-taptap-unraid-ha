@@ -1,4 +1,3 @@
-# tigo-taptap-unraid-ha
 # Tigo Optimizer Local Monitoring with ESP32, TapTap & Home Assistant
 
 This project documents an end-to-end setup for **fully local, offline monitoring** of Tigo TS4 optimizers using:
