@@ -3,7 +3,7 @@
 This project documents an end-to-end setup for **fully local, offline monitoring** of Tigo TS4 optimizers using:
 
 - A **MAX485 + ESP32** RS-485 bridge tapping the Tigo CCA GATEWAY bus.
-- The **litinoveweedle fork** of [`taptap`](https://github.com/litinoveweedle/taptap).
+- The **litinoveweedle fork** of [`taptap`](https://github.com/litinoveweedle/taptap) to create a docker on Unraid.
 - The [`taptap-mqtt`](https://github.com/litinoveweedle/taptap-mqtt) bridge to Home Assistant MQTT.
 - An **Unraid** host running the `taptap-mqtt` container.
 - **Home Assistant** with the MQTT integration and auto-discovery.
@@ -15,7 +15,7 @@ The goal is to get per-module power/voltage/temperature data into Home Assistant
 ## 1. Hardware overview
 
 - Tigo CCA (or compatible controller) with GATEWAY RS-485 port.
-- One or more Tigo TS4-A-02 optimizers (example here: 9 modules on String B).
+- One or more Tigo TS4 optimizers (I am currently using TS4-O-A but should work for the others).
 - MAX485 (or 3.3 V RS-485 transceiver like MAX3485/SP3485) module.
 - ESP32 dev board (e.g. devkit-style) with WiFi.
 - Unraid server on the same LAN as the ESP32 and Home Assistant.
@@ -41,7 +41,8 @@ This setup follows the recommendations in the upstream `taptap` docs: tap the ex
 
 **MAX485 A/B:**
 
-- Connect A/B **in parallel** to the Tigo CCA GATEWAY A/B terminals.
+- Connect A/B **in parallel** to the Tigo CCA GATEWAY A/B terminals. e.g A to A and B to B.
+- This can be added at either the TAP end or CCA end. I have opted to keep mine beside the CCA for better Wifi signal.
 - Do not add another termination resistor; keep the CCA and last TAP as the only terminations.[cite:1]
 
 ## 3. ESP32 firmware – RS-485 to TCP bridge
