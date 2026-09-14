@@ -239,6 +239,10 @@ Keep private installation details out of public commits:
 
 The ESP32 firmware is deliberately simple: it forwards bytes and provides a small local status/configuration page. It does not provide internet security or user authentication. Keep it on a trusted LAN and do not forward its HTTP or TCP ports to the public internet.
 
+## Disclaimer
+
+I am not a coder nor a programmer, I have a basic to intermediate understanding of it, so this project has had help from AI to run down versions and debug different changes as I would not have had time to do this myself.
+
 ## Credits
 
 This project builds on the TapTap protocol work and the `taptap-mqtt` bridge. Please consult their upstream repositories for protocol details, software updates, and issue reporting:
